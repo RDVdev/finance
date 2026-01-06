@@ -1,34 +1,51 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
 import math
 import os
 
-# --- APP CONFIGURATION ---
-st.set_page_config(page_title="AssetOS - Smart Investment Dashboard", layout="wide", page_icon="📈")
+# --- PAGE CONFIGURATION (Groww-like Clean UI) ---
+st.set_page_config(
+    page_title="AssetOS Pro",
+    layout="wide",
+    page_icon="🚀",
+    initial_sidebar_state="expanded"
+)
 
-# --- FILE CONSTANTS ---
+# --- CUSTOM CSS FOR "CARD" LOOK ---
+st.markdown("""
+<style>
+    .metric-card {
+        background-color: #0E1117;
+        border: 1px solid #262730;
+        border-radius: 10px;
+        padding: 15px;
+        margin-bottom: 10px;
+    }
+    .stMetric {
+        background-color: #0E1117; /* Dark theme compatible */
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- CONSTANTS & FILES ---
 WATCHLIST_FILE = "my_watchlist.csv"
 PORTFOLIO_FILE = "my_portfolio.csv"
 
-# --- EXPANDED STOCK UNIVERSE (Top 30 Indian Stocks) ---
 POPULAR_STOCKS = [
-    'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'INFY.NS',
-    'BHARTIARTL.NS', 'ITC.NS', 'SBIN.NS', 'LICI.NS', 'HINDUNILVR.NS',
-    'LT.NS', 'BAJFINANCE.NS', 'HCLTECH.NS', 'MARUTI.NS', 'SUNPHARMA.NS',
-    'TITAN.NS', 'ULTRACEMCO.NS', 'TATAMOTORS.NS', 'ASIANPAINT.NS', 'AXISBANK.NS',
-    'NTPC.NS', 'POWERGRID.NS', 'M&M.NS', 'ONGC.NS', 'WIPRO.NS',
-    'ADANIENT.NS', 'JSWSTEEL.NS', 'COALINDIA.NS', 'TATASTEEL.NS', 'BAJAJFINSV.NS'
+    'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ITC.NS',
+    'SBIN.NS', 'BHARTIARTL.NS', 'HINDUNILVR.NS', 'TATAMOTORS.NS', 'LT.NS',
+    'BAJFINANCE.NS', 'MARUTI.NS', 'TITAN.NS', 'ULTRACEMCO.NS', 'ASIANPAINT.NS',
+    'ZOMATO.NS', 'PAYTM.NS', 'ADANIENT.NS', 'JIOFIN.NS', 'TATASTEEL.NS'
 ]
 
-# --- SIP & COMMODITY TICKERS (ETFs as proxies) ---
-ETF_TICKERS = {
-    "Nifty 50 (Equity SIP)": "NIFTYBEES.NS",
-    "Nifty Next 50 (Junior)": "JUNIORBEES.NS",
-    "Gold (GoldBees)": "GOLDBEES.NS",
-    "Silver (SilverBees)": "SILVERBEES.NS",
-    "Bank Nifty": "BANKBEES.NS",
-    "IT Sector": "ITBEES.NS"
+INDICES = {
+    "Nifty 50": "^NSEI",
+    "Sensex": "^BSESN",
+    "Bank Nifty": "^NSEBANK",
+    "US Market (S&P 500)": "^GSPC"
 }
 
 # --- DATA FUNCTIONS ---
@@ -41,229 +58,275 @@ def load_csv(filename, columns):
 def save_csv(df, filename):
     df.to_csv(filename, index=False)
 
-@st.cache_data(ttl=600) # Cache data for 10 mins to speed up app
-def fetch_stock_info(ticker):
+@st.cache_data(ttl=300)
+def get_stock_info(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
+        hist = stock.history(period="1mo")
         
-        # Safe extraction of data with defaults
+        # Fundamental Data
         data = {
             "Ticker": ticker,
             "Name": info.get('shortName', ticker),
             "Price": info.get('currentPrice', 0.0),
-            "Previous Close": info.get('previousClose', 0.0),
+            "Prev Close": info.get('previousClose', 0.0),
+            "Market Cap": info.get('marketCap', 0),
             "PE Ratio": info.get('trailingPE', 0.0),
             "EPS": info.get('trailingEps', 0.0),
             "Book Value": info.get('bookValue', 0.0),
-            "52W High": info.get('fiftyTwoWeekHigh', 0.0),
-            "52W Low": info.get('fiftyTwoWeekLow', 0.0),
-            "Div Yield (%)": round(info.get('dividendYield', 0) * 100, 2) if info.get('dividendYield') else 0
+            "Sector": info.get('sector', 'Unknown'),
+            "About": info.get('longBusinessSummary', 'No summary available.')[:300] + "..."
         }
         
-        # Graham Calculation
+        # Calculate Change
+        data['Change'] = data['Price'] - data['Prev Close']
+        data['Change %'] = (data['Change'] / data['Prev Close']) * 100
+        
+        # Strategy Logic
         data['Intrinsic Value'] = 0
-        data['Signal'] = "⚪ NEUTRAL"
+        data['Signal'] = "HOLD"
         
         if data['EPS'] > 0 and data['Book Value'] > 0:
-            graham_num = math.sqrt(22.5 * data['EPS'] * data['Book Value'])
-            data['Intrinsic Value'] = round(graham_num, 2)
-            
-            if data['Price'] < graham_num:
-                data['Signal'] = "🟢 BUY (Undervalued)"
-            elif data['Price'] > graham_num * 1.5:
-                 data['Signal'] = "🔴 SELL (Overvalued)"
-            else:
-                 data['Signal'] = "🟡 HOLD (Fair)"
-                 
-        return data
-    except Exception as e:
-        return None
+            graham = math.sqrt(22.5 * data['EPS'] * data['Book Value'])
+            data['Intrinsic Value'] = round(graham, 2)
+            if data['Price'] < graham:
+                data['Signal'] = "BUY"
+            elif data['Price'] > graham * 1.5:
+                data['Signal'] = "SELL"
+        
+        return data, hist, stock.news
+    except:
+        return None, None, None
 
-# --- SIDEBAR NAVIGATION ---
-st.sidebar.title("AssetOS 📱")
-menu = st.sidebar.radio("Navigate", ["📊 Dashboard", "🔍 Market Scanner", "💰 My Portfolio", "🪙 Gold & SIPs"])
+# --- UI COMPONENTS ---
 
-# --- PAGE 1: DASHBOARD & WATCHLIST ---
-if menu == "📊 Dashboard":
-    st.title("Your Market Watchlist")
+def display_candlestick(hist, title):
+    fig = go.Figure(data=[go.Candlestick(
+        x=hist.index,
+        open=hist['Open'],
+        high=hist['High'],
+        low=hist['Low'],
+        close=hist['Close'],
+        name=title
+    )])
+    fig.update_layout(
+        title=f"{title} - 1 Month Trend",
+        height=350,
+        margin=dict(l=20, r=20, t=40, b=20),
+        xaxis_rangeslider_visible=False,
+        template="plotly_dark"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# --- MAIN APP LAYOUT ---
+
+st.sidebar.title("AssetOS 🚀")
+menu = st.sidebar.radio("Menu", ["🏠 Dashboard", "🔍 Explore Stocks", "💼 Portfolio", "🧮 SIP Calculator"])
+
+# --- TAB 1: DASHBOARD (MARKET OVERVIEW) ---
+if menu == "🏠 Dashboard":
+    st.header("Market Overview")
     
-    # Watchlist Logic
-    watchlist_df = load_csv(WATCHLIST_FILE, ['Ticker'])
-    current_tickers = watchlist_df['Ticker'].tolist()
-    
-    # Add/Remove
-    c1, c2 = st.columns([3, 1])
-    new_ticker = c1.text_input("Add Stock (e.g., ZOMATO.NS)")
-    if c2.button("Add"):
-        if new_ticker and new_ticker not in current_tickers:
-            current_tickers.append(new_ticker)
-            save_csv(pd.DataFrame(current_tickers, columns=['Ticker']), WATCHLIST_FILE)
-            st.rerun()
-
-    # Display Data
-    if current_tickers:
-        st.write(f"Tracking {len(current_tickers)} stocks...")
-        watchlist_data = []
-        progress = st.progress(0)
-        
-        for i, t in enumerate(current_tickers):
-            info = fetch_stock_info(t)
-            if info: watchlist_data.append(info)
-            progress.progress((i + 1) / len(current_tickers))
-        
-        progress.empty()
-        
-        if watchlist_data:
-            df_display = pd.DataFrame(watchlist_data)
+    # Live Indices Strip
+    cols = st.columns(4)
+    for i, (name, ticker) in enumerate(INDICES.items()):
+        data = yf.Ticker(ticker).history(period="2d")
+        if len(data) > 1:
+            curr = data['Close'].iloc[-1]
+            prev = data['Close'].iloc[-2]
+            change = curr - prev
+            pct = (change / prev) * 100
+            cols[i].metric(name, f"{int(curr)}", f"{round(pct, 2)}%")
             
-            # Key Metrics Display
+    st.markdown("---")
+    
+    # Watchlist Section
+    st.subheader("My Watchlist")
+    watchlist = load_csv(WATCHLIST_FILE, ['Ticker'])['Ticker'].tolist()
+    
+    if watchlist:
+        # Create a Summary Table
+        summary_data = []
+        for t in watchlist:
+            info, _, _ = get_stock_info(t)
+            if info:
+                summary_data.append({
+                    "Stock": t,
+                    "Price": f"₹{info['Price']}",
+                    "Change": f"{round(info['Change %'], 2)}%",
+                    "Signal": info['Signal'],
+                    "Intrinsic Value": f"₹{info['Intrinsic Value']}"
+                })
+        
+        if summary_data:
+            df = pd.DataFrame(summary_data)
+            # Custom Coloring for Signals
             st.dataframe(
-                df_display[['Ticker', 'Price', 'Signal', 'Intrinsic Value', 'PE Ratio', 'Div Yield (%)']],
-                use_container_width=True,
-                hide_index=True
+                df.style.applymap(lambda x: 'color: green' if 'BUY' in str(x) else ('color: red' if 'SELL' in str(x) else ''), subset=['Signal']),
+                use_container_width=True
             )
-            
-            # Quick Delete
-            to_del = st.selectbox("Remove Stock:", ["Select..."] + current_tickers)
-            if st.button("Delete Selected"):
-                if to_del != "Select...":
-                    current_tickers.remove(to_del)
-                    save_csv(pd.DataFrame(current_tickers, columns=['Ticker']), WATCHLIST_FILE)
-                    st.rerun()
     else:
-        st.info("Watchlist is empty. Add a stock to get started!")
+        st.info("Your watchlist is empty. Go to 'Explore Stocks' to add some.")
 
-# --- PAGE 2: MARKET SCANNER ---
-elif menu == "🔍 Market Scanner":
-    st.title("Deep Value Scanner")
-    st.markdown("Scanning Top 30 Indian Companies for Undervalued Opportunities.")
+# --- TAB 2: EXPLORE (STOCK DETAILS) ---
+elif menu == "🔍 Explore Stocks":
+    st.title("Explore & Analyze")
     
-    if st.button("🚀 Run Full Scan"):
-        scan_results = []
-        bar = st.progress(0)
+    # Search Bar
+    c1, c2 = st.columns([3, 1])
+    search_ticker = c1.text_input("Search Stock (e.g., RELIANCE.NS)", "RELIANCE.NS")
+    
+    # Quick Add to Watchlist Button
+    watchlist_df = load_csv(WATCHLIST_FILE, ['Ticker'])
+    curr_watchlist = watchlist_df['Ticker'].tolist()
+    
+    if c2.button("➕ Add to Watchlist"):
+        if search_ticker not in curr_watchlist:
+            curr_watchlist.append(search_ticker)
+            save_csv(pd.DataFrame(curr_watchlist, columns=['Ticker']), WATCHLIST_FILE)
+            st.success(f"Added {search_ticker}!")
+    
+    # Fetch Data
+    info, hist, news = get_stock_info(search_ticker)
+    
+    if info:
+        # Header Metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Price", f"₹{info['Price']}", f"{round(info['Change %'], 2)}%")
+        m2.metric("Signal", info['Signal'], f"Target: ₹{info['Intrinsic Value']}")
+        m3.metric("PE Ratio", round(info['PE Ratio'], 2))
+        m4.metric("Sector", info['Sector'])
         
-        for i, t in enumerate(POPULAR_STOCKS):
-            info = fetch_stock_info(t)
-            if info: scan_results.append(info)
-            bar.progress((i + 1) / len(POPULAR_STOCKS))
+        # 1. Interactive Chart (Plotly)
+        st.subheader("Price Chart")
+        display_candlestick(hist, search_ticker)
+        
+        # 2. Company Info & Stats
+        col_left, col_right = st.columns([2, 1])
+        with col_left:
+            st.subheader("About Company")
+            st.write(info['About'])
             
-        bar.empty()
-        
-        full_df = pd.DataFrame(scan_results)
-        
-        # Filter for BUY signals
-        buys = full_df[full_df['Signal'].str.contains("BUY")]
-        
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader(f"💎 Found {len(buys)} Undervalued Gems")
-            if not buys.empty:
-                st.success("These stocks are trading BELOW their Graham Intrinsic Value.")
-                st.dataframe(buys[['Ticker', 'Price', 'Intrinsic Value', 'PE Ratio']], hide_index=True)
+            # News Feed
+            st.subheader("📰 Latest News")
+            if news:
+                for n in news[:3]: # Show top 3 news
+                    st.markdown(f"**[{n['title']}]({n['link']})**")
+                    st.caption(f"Published by {n['publisher']}")
             else:
-                st.warning("No clear 'Undervalued' stocks found in this list. Market might be hot.")
+                st.write("No recent news found.")
                 
-        with c2:
-            st.subheader("All Scanned Stocks")
-            st.dataframe(full_df[['Ticker', 'Price', 'Signal']], height=400)
-            
-        # Download Feature
-        csv = full_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download Scan Report", csv, "market_scan.csv", "text/csv")
+        with col_right:
+            st.subheader("Key Ratios")
+            ratios = {
+                "Market Cap": f"₹{round(info['Market Cap']/10000000)} Cr",
+                "Book Value": f"₹{round(info['Book Value'], 2)}",
+                "EPS": f"₹{round(info['EPS'], 2)}"
+            }
+            st.table(ratios)
 
-# --- PAGE 3: PORTFOLIO TRACKER ---
-elif menu == "💰 My Portfolio":
-    st.title("My Holdings")
+# --- TAB 3: PORTFOLIO (VISUALS) ---
+elif menu == "💼 Portfolio":
+    st.title("My Portfolio Analysis")
     
-    # Load Portfolio
     pf_df = load_csv(PORTFOLIO_FILE, ['Ticker', 'Qty', 'AvgPrice'])
     
-    # Input Form
-    with st.expander("➕ Add New Trade"):
-        c1, c2, c3 = st.columns(3)
-        p_ticker = c1.text_input("Ticker", "TATASTEEL.NS")
-        p_qty = c2.number_input("Quantity", min_value=1, value=10)
-        p_price = c3.number_input("Avg Buy Price", min_value=1.0, value=100.0)
-        
-        if st.button("Save Trade"):
-            new_row = pd.DataFrame({'Ticker': [p_ticker], 'Qty': [p_qty], 'AvgPrice': [p_price]})
+    # Add Trade Form
+    with st.expander("📝 Log a New Trade"):
+        c1, c2, c3, c4 = st.columns(4)
+        t_tick = c1.text_input("Ticker", "TCS.NS")
+        t_qty = c2.number_input("Qty", 1)
+        t_avg = c3.number_input("Price", 100.0)
+        if c4.button("Save"):
+            new_row = pd.DataFrame({'Ticker': [t_tick], 'Qty': [t_qty], 'AvgPrice': [t_avg]})
             pf_df = pd.concat([pf_df, new_row], ignore_index=True)
             save_csv(pf_df, PORTFOLIO_FILE)
-            st.success("Trade Added!")
             st.rerun()
 
-    # Calculate Live Value
     if not pf_df.empty:
-        live_data = []
-        total_invested = 0
-        current_value = 0
+        # Calculate Live Portfolio
+        pf_data = []
+        total_inv = 0
+        total_curr = 0
+        sector_dist = {}
         
-        for index, row in pf_df.iterrows():
-            info = fetch_stock_info(row['Ticker'])
-            curr_price = info['Price'] if info else 0
-            
-            invested = row['Qty'] * row['AvgPrice']
-            curr_val = row['Qty'] * curr_price
-            pnl = curr_val - invested
-            pnl_pct = (pnl / invested * 100) if invested > 0 else 0
-            
-            total_invested += invested
-            current_value += curr_val
-            
-            live_data.append({
-                "Ticker": row['Ticker'],
-                "Qty": row['Qty'],
-                "Buy Price": row['AvgPrice'],
-                "CMP": curr_price,
-                "Invested": round(invested, 2),
-                "Current Val": round(curr_val, 2),
-                "P&L": round(pnl, 2),
-                "Return %": round(pnl_pct, 2)
-            })
-            
-        # Summary Metrics
-        st.markdown("### Portfolio Summary")
+        progress = st.progress(0)
+        for i, row in pf_df.iterrows():
+            info, _, _ = get_stock_info(row['Ticker'])
+            if info:
+                curr_val = row['Qty'] * info['Price']
+                invested = row['Qty'] * row['AvgPrice']
+                total_inv += invested
+                total_curr += curr_val
+                
+                # Sector Data for Pie Chart
+                sec = info.get('Sector', 'Other')
+                sector_dist[sec] = sector_dist.get(sec, 0) + curr_val
+                
+                pf_data.append({
+                    "Stock": row['Ticker'],
+                    "Qty": row['Qty'],
+                    "Avg": row['AvgPrice'],
+                    "LTP": info['Price'],
+                    "Current Val": round(curr_val),
+                    "P&L": round(curr_val - invested),
+                    "P&L %": round((curr_val - invested)/invested * 100, 2)
+                })
+            progress.progress((i+1)/len(pf_df))
+        progress.empty()
+        
+        # Summary Cards
+        total_pnl = total_curr - total_inv
         k1, k2, k3 = st.columns(3)
-        k1.metric("Total Invested", f"₹{round(total_invested)}")
-        k2.metric("Current Value", f"₹{round(current_value)}")
+        k1.metric("Total Invested", f"₹{int(total_inv)}")
+        k2.metric("Current Value", f"₹{int(total_curr)}")
+        k3.metric("Total Profit/Loss", f"₹{int(total_pnl)}", f"{round((total_pnl/total_inv)*100, 2)}%")
         
-        total_pnl = current_value - total_invested
-        k3.metric("Total P&L", f"₹{round(total_pnl)}", delta=f"{round((total_pnl/total_invested)*100, 2)}%")
+        st.markdown("---")
         
-        st.dataframe(pd.DataFrame(live_data), use_container_width=True)
+        # Visuals: Holdings Table + Pie Chart
+        c_table, c_chart = st.columns([2, 1])
         
-        if st.button("Clear Portfolio (Reset)"):
-            save_csv(pd.DataFrame(columns=['Ticker', 'Qty', 'AvgPrice']), PORTFOLIO_FILE)
-            st.rerun()
+        with c_table:
+            st.subheader("Holdings")
+            st.dataframe(pd.DataFrame(pf_data))
+            
+        with c_chart:
+            st.subheader("Sector Allocation")
+            if sector_dist:
+                fig = px.pie(values=list(sector_dist.values()), names=list(sector_dist.keys()), hole=0.4)
+                fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=300)
+                st.plotly_chart(fig, use_container_width=True)
 
-# --- PAGE 4: GOLD, SILVER & SIPS ---
-elif menu == "🪙 Gold & SIPs":
-    st.title("Passive Wealth Tracker")
-    st.markdown("Track the performance of Gold, Silver, and Market Indices (Best for SIPs).")
+# --- TAB 4: CALCULATORS (SIP) ---
+elif menu == "🧮 SIP Calculator":
+    st.title("SIP Wealth Calculator")
     
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([1, 1])
     
-    # Fetch Data for ETFs
-    etf_data = []
-    for name, ticker in ETF_TICKERS.items():
-        data = fetch_stock_info(ticker)
-        if data:
-            change = data['Price'] - data['Previous Close']
-            pct_change = (change / data['Previous Close']) * 100
-            etf_data.append({
-                "Asset": name,
-                "Ticker": ticker,
-                "Price": f"₹{data['Price']}",
-                "Change": f"{round(pct_change, 2)}%"
-            })
-
-    # Display Cards
-    for item in etf_data:
-        color = "normal"
-        if "-" in item['Change']: color = "inverse" # Red for negative
+    with col1:
+        monthly_inv = st.slider("Monthly Investment (₹)", 500, 100000, 5000, step=500)
+        return_rate = st.slider("Expected Return Rate (p.a %)", 5, 30, 12)
+        years = st.slider("Time Period (Years)", 1, 40, 10)
+    
+    # Calculation
+    months = years * 12
+    monthly_rate = return_rate / 12 / 100
+    future_value = monthly_inv * ((((1 + monthly_rate) ** months) - 1) / monthly_rate) * (1 + monthly_rate)
+    invested_amount = monthly_inv * months
+    wealth_gain = future_value - invested_amount
+    
+    with col2:
+        st.markdown("### Projected Wealth")
+        st.metric("Total Value", f"₹{int(future_value):,}")
+        st.metric("Invested Amount", f"₹{int(invested_amount):,}")
+        st.metric("Wealth Gained", f"₹{int(wealth_gain):,}", delta="Profit")
         
-        st.metric(label=item['Asset'], value=item['Price'], delta=item['Change'])
-        st.divider()
-
-    st.info("💡 **Tip:** Use 'NIFTYBEES' for equity SIPs and 'GOLDBEES' for digital gold investment directly from your demat account.")
+        # Growth Chart
+        chart_data = pd.DataFrame({
+            "Category": ["Invested", "Wealth Gained"],
+            "Amount": [invested_amount, wealth_gain]
+        })
+        fig = px.pie(chart_data, values="Amount", names="Category", color_discrete_sequence=['#3498db', '#2ecc71'])
+        st.plotly_chart(fig, use_container_width=True)
